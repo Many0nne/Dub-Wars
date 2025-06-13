@@ -3,6 +3,7 @@ import { Server } from 'socket.io'
 import http from 'http'
 import usersRouter from './routes/users.js'
 import partiesRouter from './routes/parties.js'
+import dubsRouter from './routes/dubs.js'
 import cors from 'cors'
 import 'dotenv/config'
 
@@ -11,6 +12,7 @@ app.use(cors({ origin: 'http://localhost:3000' }))
 app.use(express.json())
 app.use('/api/users', usersRouter)
 app.use('/api/parties', partiesRouter)
+app.use('/api/dubs', dubsRouter)
 const server = http.createServer(app)
 const io = new Server(server, {
   cors: { origin: '*' }
@@ -119,7 +121,6 @@ io.on('connection', (socket) => {
   })
 
   socket.on('startGame', ({ partyId, userId }) => {
-    console.log('startGame called', { partyId, userId, masterId: parties[partyId]?.masterId })
     if (parties[partyId]) {
       parties[partyId].state = 'in-game'
       io.to(partyId).emit('gameStarted', { partyId })

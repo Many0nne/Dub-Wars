@@ -2,6 +2,15 @@
 import { ref, computed } from 'vue'
 import VideoPlayer from '~/components/videoPlayer.vue'
 
+type KeycloakUser = {
+  tokenParsed?: {
+    sub?: string
+    preferred_username?: string
+    [key: string]: any
+  }
+  [key: string]: any
+}
+
 // Props à adapter selon ton usage
 const props = defineProps<{
   videoUrl?: string
@@ -32,6 +41,12 @@ let animationId: number | null = null
 const waveformBars = ref<number[]>([])
 const MAX_BARS = 250
 
+const route = useRoute()
+const { $keycloakPromise } = useNuxtApp()
+const partyId = route.query.partyId as string
+const { $socket } = useNuxtApp()
+const phase = ref<'dubbing' | 'waiting' | 'review'>('dubbing')
+
 function startRecording() {
     elapsed.value = 0
     isRecording.value = true
@@ -42,7 +57,13 @@ function startRecording() {
         videoPlayerRef.value.pause()
     }
 
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    navigator.mediaDevices.getUserMedia({ 
+        audio: {
+            echoCancellation: false,
+            noiseSuppression: false, 
+            autoGainControl: true,
+        }
+     }).then(stream => {
         mediaRecorder = new MediaRecorder(stream)
         const chunks: BlobPart[] = []
         mediaRecorder.ondataavailable = e => chunks.push(e.data)
@@ -50,10 +71,12 @@ function startRecording() {
         audioBlob.value = new Blob(chunks, { type: 'audio/webm' })
         stream.getTracks().forEach(track => track.stop())
         }
-        mediaRecorder.start()
-        if (videoPlayerRef.value && typeof videoPlayerRef.value.play === 'function') {
-            videoPlayerRef.value.play()
+        mediaRecorder.onstart = () => {
+            if (videoPlayerRef.value && typeof videoPlayerRef.value.play === 'function') {
+                videoPlayerRef.value.play()
+            }
         }
+        mediaRecorder.start()
         audioContext = new window.AudioContext()
         analyser = audioContext.createAnalyser()
         source = audioContext.createMediaStreamSource(stream)
@@ -175,9 +198,38 @@ function deleteAudio() {
     }
 }
 
-function validateAudio() {
-  // À compléter : envoyer l'audio au serveur, passer en attente, etc.
-  alert('Audio validé (à implémenter)')
+async function validateAudio() {
+  if (!audioBlob.value) return alert('Aucun audio à valider.')
+  const keycloak = await $keycloakPromise as KeycloakUser
+    const userId = keycloak?.tokenParsed?.sub
+    const username = keycloak?.tokenParsed?.preferred_username
+  if (!userId || !username || !partyId) {
+    alert('Utilisateur non authentifié ou party inconnue.')
+    return
+  }
+
+  const formData = new FormData()
+  formData.append('partyId', partyId)
+  formData.append('userId', userId)
+  formData.append('username', username)
+  formData.append('audio', audioBlob.value, 'dub.webm')
+  formData.append('videoUrl', videoUrl.value)
+
+  try {
+    const res = await fetch('http://localhost:3001/api/dubs', {
+      method: 'POST',
+      body: formData,
+    })
+    const data = await res.json()
+    if (data.success) {
+      phase.value = 'waiting'
+      $socket.emit('dubSubmitted', { partyId, userId })
+    } else {
+      alert('Erreur lors de l\'envoi du doublage.')
+    }
+  } catch (e) {
+    alert('Erreur réseau lors de l\'envoi du doublage.')
+  }
 }
 
 // Synchronisation vidéo (à brancher sur Socket.IO)
@@ -196,12 +248,26 @@ onUnmounted(() => {
   if (animationId) cancelAnimationFrame(animationId)
   if (audioContext) audioContext.close()
 })
+
+onMounted(() => {
+  $socket.on('allDubsReady', (payload) => {
+    phase.value = 'review'
+    console.log('Tous les doublages sont prêts !', payload)
+  })
+})
 </script>
 
 <!-- css plutôt que tailwind pour se fichier pour la lisibilité, trop de ligne :) -->
 
 <template>
-    <div class="gameplay-container">
+    <div v-if="phase === 'review'" class="review-phase">
+        <h3>Phase de vote</h3>
+        <p>Les doublages sont prêts à être votés !</p>
+    </div>
+    <div v-if="phase === 'waiting'" class="waiting-message">
+        <p>En attente des autres joueurs...</p>
+    </div>
+    <div v-else class="gameplay-container">
         <!-- Lecteur vidéo synchronisé -->
         <div class="video-container">
             <VideoPlayer
@@ -215,7 +281,7 @@ onUnmounted(() => {
             />
         </div>
 
-        <!-- Barre d'action alignée à la vidéo -->
+        <!-- Barre d'action -->
         <div class="player-container">
             <div class="waveform-container">
                 <canvas
@@ -281,7 +347,8 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.gameplay-container {
+.gameplay-container,
+.review-phase {
     max-width: 800px;
     margin: 0 auto;
     padding: 20px;
@@ -435,5 +502,89 @@ onUnmounted(() => {
     display: flex;
     gap: 16px;
     align-items: center;
+}
+
+.review-phase {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 500px;
+}
+
+.review-phase h3 {
+    color: #1db954;
+    margin-bottom: 16px;
+    font-size: 1.5rem;
+    font-weight: 600;
+    text-align: center;
+}
+
+.review-phase .vote-buttons {
+    display: flex;
+    gap: 12px;
+    margin: 16px 0;
+    justify-content: center;
+}
+
+.review-phase .vote-buttons button {
+    background-color: #282828;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 1.1rem;
+    cursor: pointer;
+    transition: background 0.2s;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.review-phase .vote-buttons button:disabled {
+    background-color: #444;
+    color: #aaa;
+    cursor: not-allowed;
+}
+
+.review-phase .vote-buttons button:not(:disabled):hover {
+    background-color: #1db954;
+    color: #fff;
+}
+
+.review-phase audio {
+    margin: 16px 0 8px 0;
+    width: 100%;
+    max-width: 500px;
+    background: #222;
+    border-radius: 6px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.10);
+}
+
+.review-phase p {
+    color: #b3b3b3;
+    font-size: 1rem;
+    margin: 8px 0;
+    text-align: center;
+}
+
+.review-phase button {
+    margin-top: 12px;
+    background-color: #4687d6;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 20px;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.review-phase button:hover:not(:disabled) {
+    background-color: #5a95e0;
+}
+
+.review-phase > div:last-child p {
+    color: #1db954;
+    font-weight: 600;
+    font-size: 1.1rem;
+    margin-top: 20px;
 }
 </style>
