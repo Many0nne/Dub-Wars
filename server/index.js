@@ -1,16 +1,33 @@
-import express from 'express'
-import { Server } from 'socket.io'
-import http from 'http'
-import usersRouter from './routes/users.js'
-import partiesRouter from './routes/parties.js'
-import dubsRouter from './routes/dubs.js'
-import votesRouter from './routes/votes.js'
-import cors from 'cors'
-import 'dotenv/config'
-import path from 'path'
+import express from 'express';
+import { Server } from 'socket.io';
+import http from 'http';
+import usersRouter from './routes/users.js';
+import partiesRouter from './routes/parties.js';
+import dubsRouter from './routes/dubs.js';
+import votesRouter from './routes/votes.js';
+import cors from 'cors';
+import 'dotenv/config';
+import path from 'path';
 
+const availableVideos = [
+  'https://www.w3schools.com/html/mov_bbb.mp4',
+  'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
+  'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
+];
 const app = express()
-app.use(cors({ origin: 'http://localhost:3000' }))
+const allowedOrigins = ['http://localhost:3000', process.env.NGROK_CLIENT];
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  }
+}));
+const BASE_URL = process.env.NUXT_SOCKET_IO_URL || 'http://localhost:3001';
 app.use(express.json())
 app.use('/api/users', usersRouter)
 app.use('/api/parties', partiesRouter)
@@ -19,21 +36,28 @@ app.use('/api/votes', votesRouter)
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
 const server = http.createServer(app)
 const io = new Server(server, {
-  cors: { origin: '*' }
-})
+  cors: {
+    origin: allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  transports: ['websocket', 'polling'] // Force les transports
+});
 
 const parties = {}
 
-io.on('connection', (socket) => {
+io.on('connection', (socket) => {  
   // Create a party
   socket.on('createParty', async({ partyId, userId, username }) => {
+    const randomVideo = availableVideos[Math.floor(Math.random() * availableVideos.length)];
     parties[partyId] = {
       members: [{ id: userId, username }],
       state: 'starting',
       masterId: userId,
       submittedDubs: [],
       currentVotingDub: null,
-      votedMembers: []
+      votedMembers: [],
+      currentVideo: randomVideo
     }
     socket.join(partyId)
     socket.emit('partyCreated', partyId)
@@ -46,17 +70,23 @@ io.on('connection', (socket) => {
       votedMembers: parties[partyId].votedMembers
     })
 
-    await fetch('http://localhost:3001/api/parties/create', {
+    await fetch(`${BASE_URL}/api/parties/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ partyId, masterId: userId })
     })
-    await fetch('http://localhost:3001/api/parties/add-member', {
+    await fetch(`${BASE_URL}/api/parties/add-member`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ partyId, userId, username })
     })
   })
+
+  socket.on('getCurrentVideo', ({ partyId }) => {
+    if (parties[partyId]) {
+      socket.emit('currentVideo', parties[partyId].currentVideo);
+    }
+  });
 
   socket.on('submitVote', async ({ partyId, voterId, dubUserId, rating }) => {
     if (!parties[partyId]) return;
@@ -64,7 +94,7 @@ io.on('connection', (socket) => {
     console.log(`Vote received from ${voterId} for ${dubUserId}`); // Debug
 
     try {
-      const voteResponse = await fetch('http://localhost:3001/api/votes', {
+      const voteResponse = await fetch(`${BASE_URL}/api/votes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ partyId, voterId, dubUserId, rating })
@@ -128,7 +158,7 @@ io.on('connection', (socket) => {
 
   async function getRandomDub(partyId) {
     try {
-      const response = await fetch(`http://localhost:3001/api/dubs/random?partyId=${partyId}`);
+      const response = await fetch(`${BASE_URL}/api/dubs/random?partyId=${partyId}`);
       const data = await response.json();
       
       if (!data.success) {
@@ -140,7 +170,7 @@ io.on('connection', (socket) => {
         userId: data.userId,
         username: data.username,
         audioUrl: data.audioUrl,
-        videoUrl: data.videoUrl,
+        videoUrl: parties[partyId].currentVideo,
       };
     } catch (error) {
       console.error('Échec dans getRandomDub:', error);
@@ -188,7 +218,7 @@ io.on('connection', (socket) => {
           votedMembers: parties[partyId].votedMembers
         })
 
-        await fetch('http://localhost:3001/api/parties/add-member', {
+        await fetch(`${BASE_URL}/api/parties/add-member`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ partyId, userId, username })
@@ -219,7 +249,7 @@ io.on('connection', (socket) => {
         votedMembers: parties[partyId].votedMembers
       })
 
-      await fetch('http://localhost:3001/api/parties/remove-member', {
+      await fetch(`${BASE_URL}/api/parties/remove-member`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ partyId, userId })
@@ -227,7 +257,7 @@ io.on('connection', (socket) => {
 
       if (parties[partyId].members.length === 0) {
         delete parties[partyId]
-        await fetch('http://localhost:3001/api/parties/delete', {
+        await fetch(`${BASE_URL}/api/parties/delete`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ partyId })
@@ -281,5 +311,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(3001, () => {
-  console.log('Socket.IO server running on port 3001')
+  console.log(`Socket.IO server running on port ${BASE_URL}`)
 })

@@ -4,13 +4,14 @@ import VideoPlayer from '~/components/videoPlayer.vue'
 import type { KeycloakUser, Dub, ResultItem } from './../types/general'
 
 const props = defineProps<{
-  videoUrl?: string
   isMaster?: boolean
   syncTime?: number
 }>()
+const BASE_URL = process.env.NUXT_SOCKET_IO_URL || 'http://localhost:3001';
 
 // Vidéo
-const videoUrl = computed(() => props.videoUrl || 'https://www.w3schools.com/html/mov_bbb.mp4')
+const videoUrl = computed(() => currentVideoUrl.value || 'https://www.w3schools.com/html/mov_bbb.mp4');
+const currentVideoUrl = ref('');
 const isMaster = computed(() => props.isMaster ?? false)
 const syncTime = computed(() => props.syncTime ?? undefined)
 const videoDuration = ref(0)
@@ -219,7 +220,7 @@ async function validateAudio() {
   formData.append('videoUrl', videoUrl.value)
 
   try {
-    const res = await fetch('http://localhost:3001/api/dubs', {
+    const res = await fetch(`${BASE_URL}/api/dubs`, {
       method: 'POST',
       body: formData,
     })
@@ -260,7 +261,7 @@ async function submitVote(selectedRating: number) {
 
 async function fetchResults() {
   try {
-    const response = await fetch(`http://localhost:3001/api/votes/${partyId}`);
+    const response = await fetch(`${BASE_URL}/api/votes/${partyId}`);
     const data = await response.json();
     
     if (data.success) {
@@ -353,6 +354,10 @@ function onVideoDuration(d: number) {
   videoDuration.value = d
 }
 
+function startNextRound() {
+  $socket.emit('nextRound', { partyId });
+}
+
 onUnmounted(() => {
   if (animationId) cancelAnimationFrame(animationId)
   if (audioContext) audioContext.close()
@@ -363,9 +368,22 @@ onUnmounted(() => {
 })
 
 onMounted(() => {
+  $socket.emit('getCurrentVideo', { partyId });
+
+  $socket.on('currentVideo', (videoUrl) => {
+    currentVideoUrl.value = videoUrl;
+  });
+
   $socket.on('startVoting', (dub) => {
     phase.value = 'voting';
     currentDub.value = dub;
+  });
+
+  $socket.on('newVideo', (videoUrl) => {
+    currentVideoUrl.value = videoUrl;
+    phase.value = 'dubbing';
+    audioBlob.value = null;
+    elapsed.value = 0;
   });
 
   $socket.on('allVotesCompleted', async () => {
@@ -419,24 +437,30 @@ onMounted(() => {
         <p>En attente des autres joueurs...</p>
     </div>
     <div v-else-if="phase === 'results'" class="results-phase">
-        <h3>Résultats finaux</h3>
-        <div v-if="results.length > 0" class="results-list">
-            <div v-for="(result, index) in results" :key="result.userId" class="result-item">
-                <div class="result-rank">#{{ index + 1 }}</div>
-                <div class="result-user">
-                    <div class="username">{{ result.username }}</div>
-                    <div class="stats">
-                        <span class="average-rating">
-                            Note moyenne: {{ typeof result.average_rating === 'number' ? result.average_rating.toFixed(2) : 'N/A' }} ★
-                        </span>
-                        <span class="vote-count">
-                            ({{ result.vote_count }} vote{{ result.vote_count > 1 ? 's' : '' }})
-                        </span>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <p v-else>Aucun résultat disponible</p>
+      <h3>Résultats finaux</h3>
+      <div v-if="results.length > 0" class="results-list">
+          <div v-for="(result, index) in results" :key="result.userId" class="result-item">
+              <div class="result-rank">#{{ index + 1 }}</div>
+              <div class="result-user">
+                  <div class="username">{{ result.username }}</div>
+                  <div class="stats">
+                      <span class="average-rating">
+                          Note moyenne: {{ typeof result.average_rating === 'number' ? result.average_rating.toFixed(2) : 'N/A' }} ★
+                      </span>
+                      <span class="vote-count">
+                          ({{ result.vote_count }} vote{{ result.vote_count > 1 ? 's' : '' }})
+                      </span>
+                  </div>
+              </div>
+          </div>
+          <button 
+            @click="startNextRound"
+            class="next-round-button"
+          >
+            Nouvelle partie
+          </button>
+      </div>
+      <p v-else>Aucun résultat disponible</p>
     </div>
     <div v-else class="gameplay-container">
         <!-- Lecteur vidéo synchronisé -->
@@ -918,5 +942,21 @@ onMounted(() => {
   background-color: #535353;
   cursor: not-allowed;
   opacity: 0.7;
+}
+
+.next-round-button {
+  padding: 12px 24px;
+  background-color: #1db954;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  cursor: pointer;
+  margin-top: 20px;
+  transition: background-color 0.2s;
+}
+
+.next-round-button:hover {
+  background-color: #1ed760;
 }
 </style>

@@ -2,6 +2,7 @@ import Keycloak from 'keycloak-js'
 
 export default defineNuxtPlugin((nuxtApp) => {
   const config = useRuntimeConfig()
+  const BASE_URL = config.public.NUXT_SOCKET_IO_URL || 'http://localhost:3001'
   const keycloakConfig = {
     url: config.public.keycloakUrl,
     realm: config.public.keycloakRealm,
@@ -21,7 +22,7 @@ export default defineNuxtPlugin((nuxtApp) => {
     nuxtApp.provide('keycloak', keycloak)
 
     if (keycloak.authenticated) {
-      await fetch('http://localhost:3001/api/users/register', {
+      await fetch(`${BASE_URL}/api/users/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

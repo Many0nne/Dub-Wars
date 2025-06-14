@@ -13,5 +13,12 @@ export default defineNuxtConfig({
       keycloakClientId: process.env.NUXT_KEYCLOAK_CLIENT_ID,
       socketIoUrl: process.env.NUXT_SOCKET_IO_URL,
     }
+  },
+  vite: {
+    server: {
+      allowedHosts: [
+        (process.env.NGROK_CLIENT || '').replace(/^https?:\/\//, ''),
+      ]
+    }
   }
 })

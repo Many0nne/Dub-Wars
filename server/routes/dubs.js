@@ -8,7 +8,7 @@ import 'dotenv/config'
 let io
 
 const router = express.Router()
-
+const BASE_URL = process.env.NUXT_SOCKET_IO_URL || 'http://localhost:3001';
 const pool = mariadb.createPool({
   host: process.env.NUXT_HOST,
   user: process.env.NUXT_USER,
@@ -37,7 +37,7 @@ router.post('/', upload.single('audio'), async (req, res) => {
   if (!partyId || !userId || !username || !req.file) {
     return res.status(400).json({ error: 'Missing fields or file' })
   }
-  const audioUrl = `http://localhost:3001/uploads/dubs/${req.file.filename}`;
+  const audioUrl = `${BASE_URL}/uploads/dubs/${req.file.filename}`;
 
   let conn
   try {
