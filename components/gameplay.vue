@@ -1,17 +1,8 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import VideoPlayer from '~/components/videoPlayer.vue'
+import type { KeycloakUser, Dub, ResultItem } from './../types/general'
 
-type KeycloakUser = {
-  tokenParsed?: {
-    sub?: string
-    preferred_username?: string
-    [key: string]: any
-  }
-  [key: string]: any
-}
-
-// Props à adapter selon ton usage
 const props = defineProps<{
   videoUrl?: string
   isMaster?: boolean
@@ -24,6 +15,7 @@ const isMaster = computed(() => props.isMaster ?? false)
 const syncTime = computed(() => props.syncTime ?? undefined)
 const videoDuration = ref(0)
 const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
+const voteVideoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
 
 // Barre d'action (audio)
 const isRecording = ref(false)
@@ -31,6 +23,8 @@ const audioBlob = ref<Blob | null>(null)
 const elapsed = ref(0)
 let mediaRecorder: MediaRecorder | null = null
 let timer: number | null = null
+const isPlaying = ref(false)
+const currentAudio = ref<HTMLAudioElement | null>(null)
 
 const waveformCanvas = ref<HTMLCanvasElement | null>(null)
 let audioContext: AudioContext | null = null
@@ -45,7 +39,10 @@ const route = useRoute()
 const { $keycloakPromise } = useNuxtApp()
 const partyId = route.query.partyId as string
 const { $socket } = useNuxtApp()
-const phase = ref<'dubbing' | 'waiting' | 'review'>('dubbing')
+const phase = ref<'dubbing' | 'waiting' | 'voting' | 'results'>('dubbing');
+const currentDub = ref<Dub | null>(null);
+const rating = ref(0);
+const results = ref<ResultItem[]>([]);
 
 function startRecording() {
     elapsed.value = 0
@@ -145,25 +142,35 @@ function playAudio() {
       if (ctx) ctx.clearRect(0, 0, waveformCanvas.value.width, waveformCanvas.value.height)
     }
 
-    // Synchronise la vidéo
-    if (videoPlayerRef.value && typeof videoPlayerRef.value.play === 'function') {
-      // Remets la vidéo au début
-      const videoEl = videoPlayerRef.value.$refs.videoRef as HTMLVideoElement | undefined
-      if (videoEl) {
-        videoEl.currentTime = 0
-        videoEl.play()
-      }
-    }
-
     audioContext = new window.AudioContext()
     analyser = audioContext.createAnalyser()
     analyser.fftSize = 256
     dataArray = new Uint8Array(analyser.frequencyBinCount)
     const audio = new Audio(URL.createObjectURL(audioBlob.value))
-    const sourceNode = audioContext.createMediaElementSource(audio)
-    sourceNode.connect(analyser)
-    analyser.connect(audioContext.destination)
-    audio.play()
+    
+    // Synchronisation précise
+    const videoEl = videoPlayerRef.value?.$refs.videoRef as HTMLVideoElement | undefined
+    if (videoEl) {
+      // Réinitialise et démarre la vidéo
+      videoEl.currentTime = 0
+      const videoStartTime = performance.now()
+      
+      // Démarre l'audio avec un léger délai pour compenser le temps de traitement
+      setTimeout(() => {
+        const sourceNode = audioContext!.createMediaElementSource(audio)
+        sourceNode.connect(analyser!)
+        analyser!.connect(audioContext!.destination)
+        
+        audio.play().then(() => {
+          // Ajuste la vidéo pour compenser le délai de démarrage
+          const audioStartTime = performance.now()
+          const delay = audioStartTime - videoStartTime
+          videoEl.currentTime = delay / 1000
+          videoEl.play()
+        })
+      }, 50)
+    }
+
     drawWaveformBars()
     audio.onended = () => {
       if (animationId) cancelAnimationFrame(animationId)
@@ -171,12 +178,8 @@ function playAudio() {
       audioContext = null
       analyser = null
       dataArray = null
-      // Mets la vidéo en pause à la fin de la lecture audio
-      if (videoPlayerRef.value && typeof videoPlayerRef.value.pause === 'function') {
-        const videoEl = videoPlayerRef.value.$refs.videoRef as HTMLVideoElement | undefined
-        if (videoEl) {
-          videoEl.pause()
-        }
+      if (videoEl) {
+        videoEl.pause()
       }
     }
   }
@@ -200,7 +203,7 @@ function deleteAudio() {
 
 async function validateAudio() {
   if (!audioBlob.value) return alert('Aucun audio à valider.')
-  const keycloak = await $keycloakPromise as KeycloakUser
+  const keycloak = await $keycloakPromise as KeycloakUser;
     const userId = keycloak?.tokenParsed?.sub
     const username = keycloak?.tokenParsed?.preferred_username
   if (!userId || !username || !partyId) {
@@ -232,12 +235,118 @@ async function validateAudio() {
   }
 }
 
-// Synchronisation vidéo (à brancher sur Socket.IO)
-function onSync(event: { action: string, time: number }) {
-  // À compléter : émettre via socket aux autres joueurs
+async function submitVote(selectedRating: number) {
+  if (!currentDub.value) return;
+  
+  const keycloak = await $keycloakPromise as KeycloakUser;
+  const userId = keycloak?.tokenParsed?.sub;
+  
+  if (!userId) return;
+
+  if (userId === currentDub.value.userId) {
+    alert("Vous ne pouvez pas voter pour votre propre doublage");
+    return;
+  }
+
+  $socket.emit('submitVote', {
+    partyId,
+    voterId: userId,
+    dubUserId: currentDub.value.userId,
+    rating: selectedRating
+  });
+  
+  phase.value = 'waiting';
 }
-function onRequestSync() {
-  // À compléter : envoyer l'état courant du master au joueur qui demande
+
+async function fetchResults() {
+  try {
+    const response = await fetch(`http://localhost:3001/api/votes/${partyId}`);
+    const data = await response.json();
+    
+    if (data.success) {
+      results.value = data.results.summary.map((item: any) => ({
+        ...item,
+        average_rating: Number(item.average_rating), // Conversion en nombre
+        vote_count: Number(item.vote_count) // Conversion en nombre
+      }));
+    }
+  } catch (error) {
+    console.error('Erreur lors de la récupération des résultats:', error);
+  }
+}
+
+function playDubWithSync() {
+  try {
+    // Si déjà en cours de lecture, on ne fait rien
+    if (isPlaying.value) return
+    
+    if (!currentDub.value) {
+      throw new Error("Aucun doublage sélectionné")
+    }
+    
+    const videoEl = voteVideoPlayerRef.value?.$refs.videoRef as HTMLVideoElement | undefined
+    if (!videoEl) {
+      throw new Error("Élément vidéo non trouvé")
+    }
+    
+    // Arrête toute lecture précédente
+    if (currentAudio.value) {
+      currentAudio.value.pause()
+      currentAudio.value = null
+    }
+    
+    // Crée un nouvel élément audio
+    const audio = new Audio(currentDub.value.audioUrl)
+    currentAudio.value = audio
+    isPlaying.value = true
+    
+    // Réinitialise les médias
+    videoEl.currentTime = 0
+    audio.currentTime = 0
+    
+    // Prépare les événements de synchronisation
+    videoEl.onplaying = () => {
+      audio.play().catch(e => {
+        console.error("Erreur de lecture audio:", e)
+        isPlaying.value = false
+      })
+    }
+    
+    // Gestion des erreurs vidéo
+    videoEl.onerror = () => {
+      console.error("Erreur de lecture vidéo")
+      isPlaying.value = false
+    }
+    
+    // Démarre la vidéo
+    videoEl.play().catch(e => {
+      console.error("Erreur de lecture vidéo:", e)
+      isPlaying.value = false
+    })
+    
+    const checkSync = setInterval(() => {
+      const diff = Math.abs(videoEl.currentTime - audio.currentTime)
+      if (diff > 0.1) { // Seuil de 100ms
+        audio.currentTime = videoEl.currentTime
+      }
+    }, 500)
+    
+    // Nettoie à la fin
+    const cleanup = () => {
+      clearInterval(checkSync)
+      isPlaying.value = false
+      videoEl.pause()
+      currentAudio.value = null
+    }
+    
+    audio.onended = cleanup
+    audio.onerror = cleanup
+    videoEl.onended = cleanup
+    
+  } catch (error) {
+    console.error("Erreur de synchronisation:", error)
+    isPlaying.value = false
+  }
 }
 
 function onVideoDuration(d: number) {
@@ -247,25 +356,87 @@ function onVideoDuration(d: number) {
 onUnmounted(() => {
   if (animationId) cancelAnimationFrame(animationId)
   if (audioContext) audioContext.close()
+  if (currentAudio.value) {
+    currentAudio.value.pause()
+    currentAudio.value = null
+  }
 })
 
 onMounted(() => {
-  $socket.on('allDubsReady', (payload) => {
-    phase.value = 'review'
-    console.log('Tous les doublages sont prêts !', payload)
-  })
-})
+  $socket.on('startVoting', (dub) => {
+    phase.value = 'voting';
+    currentDub.value = dub;
+  });
+
+  $socket.on('allVotesCompleted', async () => {
+    phase.value = 'results';
+    await fetchResults();
+  });
+
+  $socket.off('allDubsReady'); 
+});
 </script>
 
 <!-- css plutôt que tailwind pour se fichier pour la lisibilité, trop de ligne :) -->
 
 <template>
-    <div v-if="phase === 'review'" class="review-phase">
-        <h3>Phase de vote</h3>
-        <p>Les doublages sont prêts à être votés !</p>
+    <div v-if="phase === 'voting' && currentDub" class="voting-phase">
+        <h3>Votez pour le doublage de {{ currentDub.username }}</h3>
+        <div class="video-container">
+            <VideoPlayer
+                ref="voteVideoPlayerRef"
+                :src="currentDub.videoUrl"
+                :isMaster="false"
+                :syncTime="0"
+                @duration="onVideoDuration"
+            />
+        </div>
+        <div class="sync-controls">
+            <button 
+                @click="playDubWithSync" 
+                class="sync-button"
+                :disabled="isPlaying"
+            >
+                <svg viewBox="0 0 24 24" class="icon">
+                    <polygon points="8,5 16,12 8,19" fill="currentColor"/>
+                    
+                </svg>
+                {{ isPlaying ? 'Lecture en cours...' : 'Jouer' }}
+            </button>
+        </div>
+        <div class="rating-buttons">
+            <button 
+                v-for="i in 5" 
+                :key="i"
+                @click="submitVote(i)"
+                :class="{ active: rating === i }"
+            >
+                {{ i }} ★
+            </button>
+        </div>
     </div>
-    <div v-if="phase === 'waiting'" class="waiting-message">
+    <div v-else-if="phase === 'waiting'" class="waiting-message">
         <p>En attente des autres joueurs...</p>
+    </div>
+    <div v-else-if="phase === 'results'" class="results-phase">
+        <h3>Résultats finaux</h3>
+        <div v-if="results.length > 0" class="results-list">
+            <div v-for="(result, index) in results" :key="result.userId" class="result-item">
+                <div class="result-rank">#{{ index + 1 }}</div>
+                <div class="result-user">
+                    <div class="username">{{ result.username }}</div>
+                    <div class="stats">
+                        <span class="average-rating">
+                            Note moyenne: {{ typeof result.average_rating === 'number' ? result.average_rating.toFixed(2) : 'N/A' }} ★
+                        </span>
+                        <span class="vote-count">
+                            ({{ result.vote_count }} vote{{ result.vote_count > 1 ? 's' : '' }})
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <p v-else>Aucun résultat disponible</p>
     </div>
     <div v-else class="gameplay-container">
         <!-- Lecteur vidéo synchronisé -->
@@ -275,8 +446,6 @@ onMounted(() => {
                 :src="videoUrl"
                 :isMaster="isMaster"
                 :syncTime="syncTime"
-                @sync="onSync"
-                @requestSync="onRequestSync"
                 @duration="onVideoDuration"
             />
         </div>
@@ -586,5 +755,168 @@ onMounted(() => {
     font-weight: 600;
     font-size: 1.1rem;
     margin-top: 20px;
+}
+
+.voting-phase, .results-phase {
+  text-align: center;
+  padding: 20px;
+}
+
+.rating-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.rating-buttons button {
+  padding: 10px 15px;
+  font-size: 1.2rem;
+  background: #333;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.rating-buttons button.active {
+  background: #1db954;
+}
+
+.results-phase h3 {
+  color: #1db954;
+  margin-bottom: 10px;
+}
+
+.results-phase {
+  text-align: center;
+  padding: 20px;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.results-list {
+  margin-top: 20px;
+  text-align: left;
+}
+
+.result-item {
+  display: flex;
+  align-items: center;
+  padding: 15px;
+  margin-bottom: 15px;
+  background-color: #282828;
+  border-radius: 8px;
+  gap: 15px;
+}
+
+.result-rank {
+  font-size: 1.5rem;
+  font-weight: bold;
+  color: #1db954;
+  min-width: 40px;
+  text-align: center;
+}
+
+.result-user {
+  flex-grow: 1;
+}
+
+.username {
+  font-weight: bold;
+  margin-bottom: 5px;
+}
+
+.stats {
+  font-size: 0.9rem;
+  color: #b3b3b3;
+}
+
+.average-rating {
+  color: #1db954;
+  margin-right: 10px;
+}
+
+.result-audio {
+  width: 200px;
+  flex-shrink: 0;
+}
+
+.voting-phase {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.voting-phase .video-container {
+  width: 100%;
+  max-width: 640px;
+}
+
+.dub-audio {
+  width: 100%;
+  max-width: 640px;
+  margin: 10px 0;
+}
+
+.rating-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 20px;
+  flex-wrap: wrap;
+}
+
+.rating-buttons button {
+  padding: 12px 18px;
+  font-size: 1.2rem;
+  background: #333;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.rating-buttons button:hover {
+  transform: scale(1.05);
+}
+
+.rating-buttons button.active {
+  background: #1db954;
+  transform: scale(1.1);
+}
+
+
+.sync-controls {
+  margin: 20px 0;
+  display: flex;
+  justify-content: center;
+}
+
+.sync-button {
+  padding: 12px 24px;
+  background-color: #1db954;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  display: flex;
+}
+
+.sync-button:hover {
+  background-color: #1ed760;
+}
+
+.sync-button:disabled {
+  background-color: #535353;
+  cursor: not-allowed;
+  opacity: 0.7;
 }
 </style>

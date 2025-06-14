@@ -4,8 +4,10 @@ import http from 'http'
 import usersRouter from './routes/users.js'
 import partiesRouter from './routes/parties.js'
 import dubsRouter from './routes/dubs.js'
+import votesRouter from './routes/votes.js'
 import cors from 'cors'
 import 'dotenv/config'
+import path from 'path'
 
 const app = express()
 app.use(cors({ origin: 'http://localhost:3000' }))
@@ -13,6 +15,8 @@ app.use(express.json())
 app.use('/api/users', usersRouter)
 app.use('/api/parties', partiesRouter)
 app.use('/api/dubs', dubsRouter)
+app.use('/api/votes', votesRouter)
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
 const server = http.createServer(app)
 const io = new Server(server, {
   cors: { origin: '*' }
@@ -26,14 +30,20 @@ io.on('connection', (socket) => {
     parties[partyId] = {
       members: [{ id: userId, username }],
       state: 'starting',
-      masterId: userId
+      masterId: userId,
+      submittedDubs: [],
+      currentVotingDub: null,
+      votedMembers: []
     }
     socket.join(partyId)
     socket.emit('partyCreated', partyId)
     io.to(partyId).emit('partyUpdate', {
       members: parties[partyId].members,
       state: parties[partyId].state,
-      masterId: parties[partyId].masterId
+      masterId: parties[partyId].masterId,
+      currentVotingDub: parties[partyId].currentVotingDub,
+      submittedDubs: parties[partyId].submittedDubs,
+      votedMembers: parties[partyId].votedMembers
     })
 
     await fetch('http://localhost:3001/api/parties/create', {
@@ -47,6 +57,116 @@ io.on('connection', (socket) => {
       body: JSON.stringify({ partyId, userId, username })
     })
   })
+
+  socket.on('submitVote', async ({ partyId, voterId, dubUserId, rating }) => {
+    if (!parties[partyId]) return;
+
+    console.log(`Vote received from ${voterId} for ${dubUserId}`); // Debug
+
+    try {
+      const voteResponse = await fetch('http://localhost:3001/api/votes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ partyId, voterId, dubUserId, rating })
+      });
+      
+      if (!voteResponse.ok) throw new Error('Vote failed');
+
+      // Mettre à jour l'état local
+      if (!parties[partyId].votedMembers) parties[partyId].votedMembers = [];
+      parties[partyId].votedMembers.push(voterId);
+
+      const allMembers = parties[partyId].members.map(m => m.id);
+      const votersNeeded = allMembers.filter(id => id !== parties[partyId].currentVotingDub.userId);
+      const allVoted = votersNeeded.every(id => parties[partyId].votedMembers.includes(id));
+      
+      if (allVoted) {
+        await startNextVotingRound(partyId);
+      }
+    } catch (error) {
+      console.error('Vote processing error:', error);
+    }
+  });
+
+  socket.on('dubSubmitted', async ({ partyId, userId }) => {
+    if (!parties[partyId]) return;
+
+    if (!parties[partyId].submittedDubs) {
+      parties[partyId].submittedDubs = [];
+    }
+
+    if (!parties[partyId].submittedDubs.includes(userId)) {
+      parties[partyId].submittedDubs.push(userId);
+    }
+
+    const currentMembers = parties[partyId].members.map(m => m.id);
+    const allSubmitted = currentMembers.every(id => 
+      parties[partyId].submittedDubs.includes(id)
+    );
+
+    if (allSubmitted) {
+      parties[partyId].phase = 'voting';
+      
+      const nextDub = await getRandomDub(partyId);
+      
+      if (nextDub) {
+        parties[partyId].currentVotingDub = nextDub;
+        io.to(partyId).emit('startVoting', nextDub);
+      } else {
+        parties[partyId].phase = 'results';
+        io.to(partyId).emit('allVotesCompleted');
+      }
+    }
+  });
+
+  socket.on('getNextDubToVote', ({ partyId }) => {
+    if (parties[partyId]) {
+      const nextDub = getNextDubToVote(partyId);
+      io.to(partyId).emit('startVoting', nextDub);
+    }
+  });
+
+  async function getRandomDub(partyId) {
+    try {
+      const response = await fetch(`http://localhost:3001/api/dubs/random?partyId=${partyId}`);
+      const data = await response.json();
+      
+      if (!data.success) {
+        console.log('Aucun doublage disponible:', data.error);
+        return null;
+      }
+
+      return {
+        userId: data.userId,
+        username: data.username,
+        audioUrl: data.audioUrl,
+        videoUrl: data.videoUrl,
+      };
+    } catch (error) {
+      console.error('Échec dans getRandomDub:', error);
+      return null;
+    }
+  }
+
+  async function startNextVotingRound(partyId) {
+    const party = parties[partyId];
+    
+    party.votedMembers = [];
+    
+    const nextDub = await getRandomDub(partyId);
+    
+    if (nextDub) {
+      party.currentVotingDub = nextDub;
+      io.to(partyId).emit('startVoting', nextDub);
+    } else {
+      party.phase = 'results';
+      io.to(partyId).emit('allVotesCompleted');
+    }
+  }
+
+  function getNextDubToVote(partyId) {
+    return null;
+  }
 
   // Join a party
   socket.on('joinParty', async({ partyId, userId, username }) => {
@@ -62,7 +182,10 @@ io.on('connection', (socket) => {
         io.to(partyId).emit('partyUpdate', {
           members: parties[partyId].members,
           state: parties[partyId].state,
-          masterId: parties[partyId].masterId
+          masterId: parties[partyId].masterId,
+          currentVotingDub: parties[partyId].currentVotingDub,
+          submittedDubs: parties[partyId].submittedDubs,
+          votedMembers: parties[partyId].votedMembers
         })
 
         await fetch('http://localhost:3001/api/parties/add-member', {
@@ -90,7 +213,10 @@ io.on('connection', (socket) => {
       io.to(partyId).emit('partyUpdate', {
         members: parties[partyId].members,
         state: parties[partyId].state,
-        masterId: parties[partyId].masterId
+        masterId: parties[partyId].masterId,
+        currentVotingDub: parties[partyId].currentVotingDub,
+        submittedDubs: parties[partyId].submittedDubs,
+        votedMembers: parties[partyId].votedMembers
       })
 
       await fetch('http://localhost:3001/api/parties/remove-member', {
@@ -115,7 +241,10 @@ io.on('connection', (socket) => {
       socket.emit('partyUpdate', {
         members: parties[partyId].members,
         state: parties[partyId].state,
-        masterId: parties[partyId].masterId
+        masterId: parties[partyId].masterId,
+        currentVotingDub: parties[partyId].currentVotingDub,
+        submittedDubs: parties[partyId].submittedDubs,
+        votedMembers: parties[partyId].votedMembers
       })
     }
   })
@@ -138,7 +267,10 @@ io.on('connection', (socket) => {
       io.to(partyId).emit('partyUpdate', {
         members: party.members,
         state: party.state,
-        masterId: party.masterId
+        masterId: party.masterId,
+        currentVotingDub: party.currentVotingDub,
+        submittedDubs: party.submittedDubs,
+        votedMembers: party.votedMembers
       })
 
       if (party.members.length === 0) {

@@ -32,18 +32,16 @@ const storage = multer.diskStorage({
 })
 const upload = multer({ storage })
 
-// POST /api/dubs : enregistre un doublage
 router.post('/', upload.single('audio'), async (req, res) => {
   const { partyId, userId, username, videoUrl } = req.body
   if (!partyId || !userId || !username || !req.file) {
     return res.status(400).json({ error: 'Missing fields or file' })
   }
-  const audioUrl = `/uploads/dubs/${req.file.filename}`
+  const audioUrl = `http://localhost:3001/uploads/dubs/${req.file.filename}`;
 
   let conn
   try {
     conn = await pool.getConnection()
-    // Un doublage par user/party (remplace si existe déjà)
     await conn.query(
         `INSERT INTO dubs (party_id, user_id, username, audio_url, video_url, created_at)
         VALUES (?, ?, ?, ?, ?, NOW())
@@ -51,23 +49,19 @@ router.post('/', upload.single('audio'), async (req, res) => {
         [partyId, userId, username, audioUrl, videoUrl]
     )
 
-    // Vérifie combien de doublages sont présents pour cette partie
     const [dubsCountRow] = await conn.query(
       'SELECT COUNT(*) as count FROM dubs WHERE party_id = ?',
       [partyId]
     )
     const dubsCount = dubsCountRow.count
 
-    // Récupère le nombre de membres de la partie
     const [membersCountRow] = await conn.query(
       'SELECT COUNT(*) as count FROM party_members WHERE party_id = ?',
       [partyId]
     )
     const membersCount = membersCountRow.count
 
-    // Si tout le monde a envoyé, notifie via socket
     if (io && dubsCount === membersCount && dubsCount > 0) {
-      // Récupère tous les doublages pour la partie
       const dubs = await conn.query(
         'SELECT user_id, username, audio_url, video_url FROM dubs WHERE party_id = ?',
         [partyId]
@@ -84,7 +78,54 @@ router.post('/', upload.single('audio'), async (req, res) => {
   }
 })
 
-// GET /api/dubs/:partyId : récupère tous les doublages d'une partie
+router.get('/random', async (req, res) => {
+  let conn;
+  try {
+    const { partyId } = req.query;
+    
+    if (!partyId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'partyId est requis' 
+      });
+    }
+
+    conn = await pool.getConnection();
+
+    const rows = await conn.query(`
+      SELECT user_id as userId, username, audio_url as audioUrl, video_url as videoUrl 
+      FROM dubs 
+      WHERE party_id = ? AND has_been_voted = FALSE
+      ORDER BY RAND() LIMIT 1
+    `, [partyId]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Aucun doublage disponible',
+        dubs: [] 
+      });
+    }
+
+    const dub = rows[0];
+    res.json({ 
+      success: true,
+      userId: dub.userId,
+      username: dub.username,
+      audioUrl: dub.audioUrl,
+      videoUrl: dub.videoUrl
+    });
+  } catch (error) {
+    console.error('ERREUR CRITIQUE dans /random:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 router.get('/:partyId', async (req, res) => {
   const { partyId } = req.params
   let conn
