@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import VideoPlayer from '~/components/videoPlayer.vue'
 import type { KeycloakUser, Dub, ResultItem } from './../types/general'
+import Toast from '~/components/Toast.vue'
 
 const props = defineProps<{
   isMaster?: boolean
@@ -44,6 +45,8 @@ const phase = ref<'dubbing' | 'waiting' | 'voting' | 'results'>('dubbing');
 const currentDub = ref<Dub | null>(null);
 const rating = ref(0);
 const results = ref<ResultItem[]>([]);
+const userId = ref<string | null>(null)
+const toastMessage = ref('')
 
 function startRecording() {
     elapsed.value = 0
@@ -253,26 +256,23 @@ async function submitVote(selectedRating: number) {
     partyId,
     voterId: userId,
     dubUserId: currentDub.value.userId,
-    rating: selectedRating
+    rating: selectedRating,
+    videoUrl: currentDub.value.videoUrl // Ajout de la vidéo courante pour l'unicité du vote
   });
   
   phase.value = 'waiting';
 }
 
 async function fetchResults() {
-  try {
-    const response = await fetch(`${BASE_URL}/api/votes/${partyId}`);
-    const data = await response.json();
-    
-    if (data.success) {
-      results.value = data.results.summary.map((item: any) => ({
-        ...item,
-        average_rating: Number(item.average_rating), // Conversion en nombre
-        vote_count: Number(item.vote_count) // Conversion en nombre
-      }));
-    }
-  } catch (error) {
-    console.error('Erreur lors de la récupération des résultats:', error);
+  const response = await fetch(`${BASE_URL}/api/votes/${partyId}`);
+  const data = await response.json();
+  
+  if (data.success) {
+    results.value = data.results.summary.map((item: any) => ({
+      ...item,
+      average_rating: Number(item.average_rating), // Conversion en nombre
+      vote_count: Number(item.vote_count) // Conversion en nombre
+    }));
   }
 }
 
@@ -308,20 +308,17 @@ function playDubWithSync() {
     // Prépare les événements de synchronisation
     videoEl.onplaying = () => {
       audio.play().catch(e => {
-        console.error("Erreur de lecture audio:", e)
         isPlaying.value = false
       })
     }
     
     // Gestion des erreurs vidéo
     videoEl.onerror = () => {
-      console.error("Erreur de lecture vidéo")
       isPlaying.value = false
     }
     
     // Démarre la vidéo
     videoEl.play().catch(e => {
-      console.error("Erreur de lecture vidéo:", e)
       isPlaying.value = false
     })
     
@@ -345,7 +342,6 @@ function playDubWithSync() {
     videoEl.onended = cleanup
     
   } catch (error) {
-    console.error("Erreur de synchronisation:", error)
     isPlaying.value = false
   }
 }
@@ -358,6 +354,42 @@ function startNextRound() {
   $socket.emit('nextRound', { partyId });
 }
 
+function resetRecordingState() {
+  // Stop recording if active
+  if (isRecording.value) {
+    stopRecording();
+  }
+  // Stop and clean up audio playback
+  if (currentAudio.value) {
+    currentAudio.value.pause();
+    currentAudio.value = null;
+  }
+  // Clean up waveform
+  waveformBars.value = [];
+  if (animationId) cancelAnimationFrame(animationId);
+  if (waveformCanvas.value) {
+    const ctx = waveformCanvas.value.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, waveformCanvas.value.width, waveformCanvas.value.height);
+  }
+  // Clean up audio context
+  if (audioContext) {
+    audioContext.close();
+    audioContext = null;
+  }
+  analyser = null;
+  source = null;
+  dataArray = null;
+  // Reset video
+  if (videoPlayerRef.value && videoPlayerRef.value.videoRef) {
+    videoPlayerRef.value.videoRef.currentTime = 0;
+    videoPlayerRef.value.pause();
+  }
+  // Reset state
+  audioBlob.value = null;
+  elapsed.value = 0;
+  rating.value = 0;
+}
+
 onUnmounted(() => {
   if (animationId) cancelAnimationFrame(animationId)
   if (audioContext) audioContext.close()
@@ -367,7 +399,9 @@ onUnmounted(() => {
   }
 })
 
-onMounted(() => {
+onMounted(async () => {
+  const keycloak = await $keycloakPromise as KeycloakUser;
+  userId.value = keycloak?.tokenParsed?.sub || null;
   $socket.emit('getCurrentVideo', { partyId });
 
   $socket.on('currentVideo', (videoUrl) => {
@@ -382,8 +416,8 @@ onMounted(() => {
   $socket.on('newVideo', (videoUrl) => {
     currentVideoUrl.value = videoUrl;
     phase.value = 'dubbing';
-    audioBlob.value = null;
-    elapsed.value = 0;
+    resetRecordingState();
+    // Optionnel : reset d'autres états si besoin
   });
 
   $socket.on('allVotesCompleted', async () => {
@@ -392,12 +426,18 @@ onMounted(() => {
   });
 
   $socket.off('allDubsReady'); 
+
+  $socket.on('allDubsCompleted', () => {
+    toastMessage.value = "Toutes les vidéos ont été doublées !";
+  });
+  
 });
 </script>
 
 <!-- css plutôt que tailwind pour se fichier pour la lisibilité, trop de ligne :) -->
 
 <template>
+  <Toast :message="toastMessage" />
     <div v-if="phase === 'voting' && currentDub" class="voting-phase">
         <h3>Votez pour le doublage de {{ currentDub.username }}</h3>
         <div class="video-container">
@@ -423,13 +463,14 @@ onMounted(() => {
             </button>
         </div>
         <div class="rating-buttons">
-            <button 
-                v-for="i in 5" 
-                :key="i"
-                @click="submitVote(i)"
-                :class="{ active: rating === i }"
+            <button
+              v-for="i in 5"
+              :key="i"
+              @click="submitVote(i)"
+              :class="{ active: rating === i, 'disabled-btn': userId === currentDub.userId }"
+              :disabled="userId === currentDub.userId"
             >
-                {{ i }} ★
+              {{ i }} ★
             </button>
         </div>
     </div>
@@ -958,5 +999,12 @@ onMounted(() => {
 
 .next-round-button:hover {
   background-color: #1ed760;
+}
+
+.disabled-btn {
+  background-color: #444 !important;
+  color: #aaa !important;
+  cursor: not-allowed !important;
+  opacity: 0.7;
 }
 </style>

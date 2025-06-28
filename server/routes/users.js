@@ -25,7 +25,6 @@ router.post('/register', async (req, res) => {
     )
     res.json({ success: true })
   } catch (err) {
-    console.error('Erreur MariaDB:', err)
     res.status(500).json({ error: err.message })
   } finally {
     if (conn) conn.release()

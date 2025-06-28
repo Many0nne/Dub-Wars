@@ -67,3 +67,9 @@ onMounted(() => {
     />
   </div>
 </template>
+
+<style scoped="css">
+:deep(video) {
+  max-height: 60svh;
+}
+</style>

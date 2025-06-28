@@ -22,10 +22,6 @@ onMounted(async () => {
   if (partyId && page) {
     router.replace({ path: `/${page}`, query: { partyId } })
   }
-
-  $socket.on('connect', () => {
-    console.log('Connected to socket server')
-  })
 })
 
 const logout = () => {

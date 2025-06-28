@@ -71,7 +71,6 @@ router.post('/', upload.single('audio'), async (req, res) => {
 
     res.json({ success: true, audioUrl })
   } catch (err) {
-    console.error('Erreur MariaDB:', err)
     res.status(500).json({ error: err.message })
   } finally {
     if (conn) conn.release()
@@ -116,7 +115,6 @@ router.get('/random', async (req, res) => {
       videoUrl: dub.videoUrl
     });
   } catch (error) {
-    console.error('ERREUR CRITIQUE dans /random:', error);
     res.status(500).json({ 
       success: false, 
       error: error.message 
@@ -137,7 +135,6 @@ router.get('/:partyId', async (req, res) => {
     )
     res.json({ dubs: rows })
   } catch (err) {
-    console.error('Erreur MariaDB:', err)
     res.status(500).json({ error: err.message })
   } finally {
     if (conn) conn.release()

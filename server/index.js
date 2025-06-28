@@ -10,9 +10,11 @@ import 'dotenv/config';
 import path from 'path';
 
 const availableVideos = [
-  'https://www.w3schools.com/html/mov_bbb.mp4',
-  'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
-  'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
+  'http://localhost:3001/videos/TiboInshape.mp4',
+  'http://localhost:3001/videos/Breaking bad.mp4',
+  'http://localhost:3001/videos/GameMixTreize.mp4',
+  'http://localhost:3001/videos/Les Simpsons - homer.mp4',
+  'http://localhost:3001/videos/Regegorilla.mov',
 ];
 const app = express()
 const allowedOrigins = ['http://localhost:3000', process.env.NGROK_CLIENT];
@@ -27,6 +29,7 @@ app.use(cors({
     }
   }
 }));
+app.use('/videos', express.static(path.join(process.cwd(), 'public/videos')));
 const BASE_URL = process.env.NUXT_SOCKET_IO_URL || 'http://localhost:3001';
 app.use(express.json())
 app.use('/api/users', usersRouter)
@@ -49,7 +52,7 @@ const parties = {}
 io.on('connection', (socket) => {  
   // Create a party
   socket.on('createParty', async({ partyId, userId, username }) => {
-    const randomVideo = availableVideos[Math.floor(Math.random() * availableVideos.length)];
+    const videos = availableVideos.map(url => ({ url, dubbed: false }));
     parties[partyId] = {
       members: [{ id: userId, username }],
       state: 'starting',
@@ -57,7 +60,9 @@ io.on('connection', (socket) => {
       submittedDubs: [],
       currentVotingDub: null,
       votedMembers: [],
-      currentVideo: randomVideo
+      videos,
+      currentVideoIndex: 0,
+      currentVideo: videos[0].url,
     }
     socket.join(partyId)
     socket.emit('partyCreated', partyId)
@@ -88,36 +93,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('submitVote', async ({ partyId, voterId, dubUserId, rating }) => {
-    if (!parties[partyId]) return;
-
-    console.log(`Vote received from ${voterId} for ${dubUserId}`); // Debug
-
-    try {
-      const voteResponse = await fetch(`${BASE_URL}/api/votes`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ partyId, voterId, dubUserId, rating })
-      });
-      
-      if (!voteResponse.ok) throw new Error('Vote failed');
-
-      // Mettre à jour l'état local
-      if (!parties[partyId].votedMembers) parties[partyId].votedMembers = [];
-      parties[partyId].votedMembers.push(voterId);
-
-      const allMembers = parties[partyId].members.map(m => m.id);
-      const votersNeeded = allMembers.filter(id => id !== parties[partyId].currentVotingDub.userId);
-      const allVoted = votersNeeded.every(id => parties[partyId].votedMembers.includes(id));
-      
-      if (allVoted) {
-        await startNextVotingRound(partyId);
-      }
-    } catch (error) {
-      console.error('Vote processing error:', error);
-    }
-  });
-
+  // Ajout d'une gestion de file d'attente des doublages à voter
   socket.on('dubSubmitted', async ({ partyId, userId }) => {
     if (!parties[partyId]) return;
 
@@ -136,12 +112,87 @@ io.on('connection', (socket) => {
 
     if (allSubmitted) {
       parties[partyId].phase = 'voting';
-      
-      const nextDub = await getRandomDub(partyId);
-      
-      if (nextDub) {
+      // Correction : utiliser la bonne route pour récupérer les doublages
+      const dubsResponse = await fetch(`${BASE_URL}/api/dubs/${partyId}`);
+      const dubsData = await dubsResponse.json();
+      if (!dubsData.dubs || !Array.isArray(dubsData.dubs)) {
+        parties[partyId].phase = 'results';
+        io.to(partyId).emit('allVotesCompleted');
+        return;
+      }
+      // Filtrer les doublages pour ne garder que ceux de la vidéo courante
+      const currentVideo = parties[partyId].currentVideo;
+      const filteredDubs = dubsData.dubs.filter(dub => dub.video_url === currentVideo || dub.videoUrl === currentVideo);
+      if (filteredDubs.length === 0) {
+        parties[partyId].phase = 'results';
+        io.to(partyId).emit('allVotesCompleted');
+        return;
+      }
+      // On crée une file d'attente des doublages à voter
+      parties[partyId].dubsToVote = filteredDubs.map(dub => ({
+        userId: dub.user_id || dub.userId,
+        username: dub.username,
+        audioUrl: dub.audio_url || dub.audioUrl,
+        videoUrl: dub.video_url || dub.videoUrl,
+      }));
+      parties[partyId].currentDubIndex = 0;
+      parties[partyId].votedMembers = [];
+      // On lance le vote sur le premier doublage
+      const firstDub = parties[partyId].dubsToVote[0];
+      parties[partyId].currentVotingDub = firstDub;
+      // Vérifie s'il y a au moins un votant possible (pas l'auteur)
+      const eligibleVoters = parties[partyId].members.filter(m => m.id !== firstDub.userId);
+      if (eligibleVoters.length === 0) {
+        // Personne ne peut voter, passe au doublage suivant
+        skipToNextDubOrResults(partyId);
+      } else {
+        io.to(partyId).emit('startVoting', firstDub);
+      }
+    }
+  });
+
+  socket.on('submitVote', async ({ partyId, voterId, dubUserId, rating, videoUrl }) => {
+    if (!parties[partyId]) return;
+
+    // Empêche un joueur de voter plusieurs fois pour le même doublage dans ce round
+    if (parties[partyId].votedMembers && parties[partyId].votedMembers.includes(voterId)) {
+      return;
+    }
+
+
+    const voteResponse = await fetch(`${BASE_URL}/api/votes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ partyId, voterId, dubUserId, rating, videoUrl }) // Ajout de videoUrl
+    });
+    
+    if (!voteResponse.ok) throw new Error('Vote failed');
+
+    // Mettre à jour l'état local
+    if (!parties[partyId].votedMembers) parties[partyId].votedMembers = [];
+    parties[partyId].votedMembers.push(voterId);
+
+    const currentDub = parties[partyId].currentVotingDub;
+    const allMembers = parties[partyId].members.map(m => m.id);
+    const votersNeeded = allMembers.filter(id => id !== currentDub.userId);
+    const allVoted = votersNeeded.every(id => parties[partyId].votedMembers.includes(id));
+
+    if (allVoted) {
+      // Passe au doublage suivant dans la file
+      parties[partyId].votedMembers = [];
+      parties[partyId].currentDubIndex = (parties[partyId].currentDubIndex || 0) + 1;
+      const dubsToVote = parties[partyId].dubsToVote || [];
+      if (parties[partyId].currentDubIndex < dubsToVote.length) {
+        const nextDub = dubsToVote[parties[partyId].currentDubIndex];
         parties[partyId].currentVotingDub = nextDub;
-        io.to(partyId).emit('startVoting', nextDub);
+        // Vérifie s'il y a au moins un votant possible (pas l'auteur)
+        const eligibleVoters = parties[partyId].members.filter(m => m.id !== nextDub.userId);
+        if (eligibleVoters.length === 0) {
+          // Personne ne peut voter, passe au doublage suivant
+          skipToNextDubOrResults(partyId);
+        } else {
+          io.to(partyId).emit('startVoting', nextDub);
+        }
       } else {
         parties[partyId].phase = 'results';
         io.to(partyId).emit('allVotesCompleted');
@@ -149,56 +200,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('getNextDubToVote', ({ partyId }) => {
-    if (parties[partyId]) {
-      const nextDub = getNextDubToVote(partyId);
-      io.to(partyId).emit('startVoting', nextDub);
-    }
-  });
-
-  async function getRandomDub(partyId) {
-    try {
-      const response = await fetch(`${BASE_URL}/api/dubs/random?partyId=${partyId}`);
-      const data = await response.json();
-      
-      if (!data.success) {
-        console.log('Aucun doublage disponible:', data.error);
-        return null;
-      }
-
-      return {
-        userId: data.userId,
-        username: data.username,
-        audioUrl: data.audioUrl,
-        videoUrl: parties[partyId].currentVideo,
-      };
-    } catch (error) {
-      console.error('Échec dans getRandomDub:', error);
-      return null;
-    }
-  }
-
-  async function startNextVotingRound(partyId) {
-    const party = parties[partyId];
-    
-    party.votedMembers = [];
-    
-    const nextDub = await getRandomDub(partyId);
-    
-    if (nextDub) {
-      party.currentVotingDub = nextDub;
-      io.to(partyId).emit('startVoting', nextDub);
-    } else {
-      party.phase = 'results';
-      io.to(partyId).emit('allVotesCompleted');
-    }
-  }
-
-  function getNextDubToVote(partyId) {
-    return null;
-  }
-
-  // Join a party
   socket.on('joinParty', async({ partyId, userId, username }) => {
     if (parties[partyId]) {
       if (parties[partyId].state !== 'starting') {
@@ -281,10 +282,40 @@ io.on('connection', (socket) => {
 
   socket.on('startGame', ({ partyId, userId }) => {
     if (parties[partyId]) {
+      if (parties[partyId].members.length < 2) {
+        socket.emit('startGameError', { reason: 'not-enough-players' })
+        return
+      }
       parties[partyId].state = 'in-game'
       io.to(partyId).emit('gameStarted', { partyId })
     }
   })
+
+  // Ajout de la gestion du passage à la vidéo suivante et du marquage "dubbed"
+  socket.on('nextRound', ({ partyId }) => {
+    const party = parties[partyId];
+    if (!party) return;
+    // Marque la vidéo courante comme doublée
+    const current = party.videos[party.currentVideoIndex];
+    if (current) current.dubbed = true;
+    // Passe à la suivante
+    const nextIndex = party.videos.findIndex(v => !v.dubbed);
+    if (nextIndex !== -1) {
+      party.currentVideoIndex = nextIndex;
+      party.currentVideo = party.videos[nextIndex].url;
+      // Réinitialise l’état de la partie pour la nouvelle manche
+      party.submittedDubs = [];
+      party.currentVotingDub = null;
+      party.votedMembers = [];
+      party.phase = 'dubbing';
+      io.to(partyId).emit('newVideo', party.currentVideo);
+    } else {
+      // Plus de vidéos disponibles, fin de la partie
+      party.phase = 'results';
+      io.to(partyId).emit('allDubsCompleted')
+      io.to(partyId).emit('allVotesCompleted');
+    }
+  });
 
   // Handle disconnect
   socket.on('disconnect', async() => {
@@ -311,5 +342,4 @@ io.on('connection', (socket) => {
 })
 
 server.listen(3001, () => {
-  console.log(`Socket.IO server running on port ${BASE_URL}`)
 })

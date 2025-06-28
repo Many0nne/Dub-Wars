@@ -19,14 +19,14 @@ BigInt.prototype.toJSON = function() {
 router.post('/', async (req, res) => {
   let conn;
   try {
-    const { partyId, voterId, dubUserId, rating } = req.body;
+    const { partyId, voterId, dubUserId, rating, videoUrl } = req.body;
     conn = await pool.getConnection();
 
     // Validation des données
-    if (!partyId || !voterId || !dubUserId || !rating) {
+    if (!partyId || !voterId || !dubUserId || !rating || !videoUrl) {
       return res.status(400).json({ 
         success: false, 
-        error: 'Tous les champs sont requis (partyId, voterId, dubUserId, rating)' 
+        error: 'Tous les champs sont requis (partyId, voterId, dubUserId, rating, videoUrl)' 
       });
     }
 
@@ -48,13 +48,13 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Vérifier que l'utilisateur n'a pas déjà voté
+    // Vérifier que l'utilisateur n'a pas déjà voté pour ce doublage
     const existingVote = await conn.query(
-      'SELECT id FROM votes WHERE party_id = ? AND voter_id = ? AND dub_user_id = ?',
-      [partyId, voterId, dubUserId]
+      'SELECT id FROM votes WHERE party_id = ? AND voter_id = ? AND dub_user_id = ? AND video_url = ?',
+      [partyId, voterId, dubUserId, videoUrl]
     );
 
-    if (existingVote && existingVote.length > 0) {
+    if (Array.isArray(existingVote) && existingVote.length > 0 && existingVote[0].id) {
       return res.status(409).json({ 
         success: false, 
         error: 'Vous avez déjà voté pour ce doublage' 
@@ -63,8 +63,8 @@ router.post('/', async (req, res) => {
 
     // Enregistrement du vote
     const result = await conn.query(
-      'INSERT INTO votes (party_id, voter_id, dub_user_id, note) VALUES (?, ?, ?, ?)',
-      [partyId, voterId, dubUserId, numericRating]
+      'INSERT INTO votes (party_id, voter_id, dub_user_id, note, video_url) VALUES (?, ?, ?, ?, ?)',
+      [partyId, voterId, dubUserId, numericRating, videoUrl]
     );
 
     // Mettre à jour le flag has_been_voted
@@ -82,7 +82,6 @@ router.post('/', async (req, res) => {
     res.json(responseData);
 
   } catch (error) {
-    console.error('Erreur lors de l\'enregistrement du vote:', error);
     res.status(500).json({ 
       success: false, 
       error: 'Erreur serveur lors de l\'enregistrement du vote',
@@ -133,7 +132,6 @@ router.get('/:partyId', async (req, res) => {
     res.json(responseData);
 
   } catch (error) {
-    console.error('Erreur lors de la récupération des résultats:', error);
     res.status(500).json({ 
       success: false, 
       error: 'Erreur serveur lors de la récupération des résultats',

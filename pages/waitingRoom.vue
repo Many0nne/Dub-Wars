@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import Toast from '~/components/Toast.vue'
 
 const loading = ref(true)
 const { $socket, $keycloakPromise } = useNuxtApp()
@@ -13,6 +14,7 @@ const mySocketId = ref('')
 const keycloak = ref<any>(null)
 const username = ref('')
 const userId = computed(() => keycloak.value?.tokenParsed?.sub)
+const toastMessage = ref('')
 
 onMounted(async () => {
     keycloak.value = await $keycloakPromise
@@ -48,10 +50,18 @@ onMounted(async () => {
         router.push({ path: '/inGame', query: { partyId } })
     })
 
+    $socket.on('startGameError', (payload) => {
+        if (payload.reason === 'not-enough-players') {
+            toastMessage.value = ''
+            setTimeout(() => {
+                toastMessage.value = "Vous ne pouvez pas démarrer la partie seul. Rejoignez une autre partie ou invitez des amis."
+            }, 10)
+        }
+    })
 })
 
 function leaveGame() {
-  $socket.emit('leaveParty', { partyId: partyId.value, userId })
+  $socket.emit('leaveParty', { partyId: partyId.value, userId: userId.value })
 
   // Nettoie la liste des membres locaux
   members.value = []
@@ -72,6 +82,7 @@ const isMaster = computed(() => {
 </script>
 
 <template>
+    <Toast :message="toastMessage" />
     <div v-if="loading" class="flex items-center justify-center min-h-screen">
         <div role="status">
             <svg aria-hidden="true" class="w-8 h-8 text-gray-200 animate-spin dark:text-gray-600 fill-blue-600" viewBox="0 0 100 101" fill="none" xmlns="http://www.w3.org/2000/svg">
