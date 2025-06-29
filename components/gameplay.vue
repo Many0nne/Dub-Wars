@@ -56,6 +56,7 @@ function startRecording() {
     if (videoPlayerRef.value && videoPlayerRef.value.videoRef) {
         videoPlayerRef.value.videoRef.currentTime = 0
         videoPlayerRef.value.pause()
+        videoPlayerRef.value.videoRef.muted = true
     }
 
     navigator.mediaDevices.getUserMedia({ 
@@ -133,6 +134,7 @@ function stopRecording() {
     dataArray = null
     if (videoPlayerRef.value && typeof videoPlayerRef.value.pause === 'function') {
         videoPlayerRef.value.pause()
+        videoPlayerRef.value.videoRef.muted = false
     }
 }
 
@@ -157,6 +159,7 @@ function playAudio() {
     if (videoEl) {
       // Réinitialise et démarre la vidéo
       videoEl.currentTime = 0
+      videoEl.muted = true
       const videoStartTime = performance.now()
       
       // Démarre l'audio avec un léger délai pour compenser le temps de traitement
@@ -184,6 +187,7 @@ function playAudio() {
       dataArray = null
       if (videoEl) {
         videoEl.pause()
+        videoEl.muted = false
       }
     }
   }
@@ -206,6 +210,14 @@ function deleteAudio() {
 }
 
 async function validateAudio() {
+  if (currentAudio.value) {
+    currentAudio.value.pause();
+    currentAudio.value = null;
+  }
+  if (audioContext) {
+    audioContext.close();
+    audioContext = null;
+  }
   if (!audioBlob.value) return alert('Aucun audio à valider.')
   const keycloak = await $keycloakPromise as KeycloakUser;
     const userId = keycloak?.tokenParsed?.sub
@@ -304,6 +316,8 @@ function playDubWithSync() {
     // Réinitialise les médias
     videoEl.currentTime = 0
     audio.currentTime = 0
+
+    videoEl.muted = true
     
     // Prépare les événements de synchronisation
     videoEl.onplaying = () => {
@@ -334,6 +348,7 @@ function playDubWithSync() {
       clearInterval(checkSync)
       isPlaying.value = false
       videoEl.pause()
+      videoEl.muted = false
       currentAudio.value = null
     }
     
@@ -409,9 +424,19 @@ onMounted(async () => {
   });
 
   $socket.on('startVoting', (dub) => {
-    phase.value = 'voting';
-    currentDub.value = dub;
-  });
+  // Stoppe la lecture du doublage précédent si en cours
+  if (currentAudio.value) {
+    currentAudio.value.pause();
+    currentAudio.value = null;
+    isPlaying.value = false;
+  }
+  if (voteVideoPlayerRef.value && voteVideoPlayerRef.value.videoRef) {
+    voteVideoPlayerRef.value.videoRef.pause();
+    voteVideoPlayerRef.value.videoRef.muted = false;
+  }
+  phase.value = 'voting';
+  currentDub.value = dub;
+});
 
   $socket.on('newVideo', (videoUrl) => {
     currentVideoUrl.value = videoUrl;
@@ -421,9 +446,19 @@ onMounted(async () => {
   });
 
   $socket.on('allVotesCompleted', async () => {
-    phase.value = 'results';
-    await fetchResults();
-  });
+  // Stoppe la lecture du doublage si en cours (phase vote)
+  if (currentAudio.value) {
+    currentAudio.value.pause();
+    currentAudio.value = null;
+    isPlaying.value = false;
+  }
+  if (voteVideoPlayerRef.value && voteVideoPlayerRef.value.videoRef) {
+    voteVideoPlayerRef.value.videoRef.pause();
+    voteVideoPlayerRef.value.videoRef.muted = false;
+  }
+  phase.value = 'results';
+  await fetchResults();
+});
 
   $socket.off('allDubsReady'); 
 
@@ -439,7 +474,7 @@ onMounted(async () => {
 <template>
   <Toast :message="toastMessage" />
     <div v-if="phase === 'voting' && currentDub" class="voting-phase">
-        <h3>Votez pour le doublage de {{ currentDub.username }}</h3>
+        <h3 class="video-title">Votez pour le doublage de {{ currentDub.username }}</h3>
         <div class="video-container">
             <VideoPlayer
                 ref="voteVideoPlayerRef"
@@ -1006,5 +1041,11 @@ onMounted(async () => {
   color: #aaa !important;
   cursor: not-allowed !important;
   opacity: 0.7;
+}
+
+.video-title {
+  font-size: 1.5rem;
+  color: #1db954;
+  margin-bottom: 10px;
 }
 </style>
